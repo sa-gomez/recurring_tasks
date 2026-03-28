@@ -96,7 +96,7 @@ def query(sql, params=(), one=False, returning=False):
             return result
         if cur.description:
             rows = cur.fetchall()
-            return rows[0] if one else rows
+            return (rows[0] if rows else None) if one else rows
         db.commit()
         return cur.rowcount
 
