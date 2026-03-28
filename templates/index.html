@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recurring Tasks</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<div class="layout">
+  <header>
+    <h1>Recurring Tasks</h1>
+    <button class="btn-primary" id="open-add-modal">+ Add Task</button>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="due">Due</button>
+    <button class="tab" data-tab="upcoming">Upcoming</button>
+    <button class="tab" data-tab="all">All Tasks</button>
+  </nav>
+
+  <main>
+    <div id="tab-due" class="tab-panel">
+      <p class="empty-state" id="due-empty" style="display:none">Nothing due — you're all caught up!</p>
+      <ul class="task-list" id="due-list"></ul>
+    </div>
+
+    <div id="tab-upcoming" class="tab-panel" style="display:none">
+      <p class="empty-state" id="upcoming-empty" style="display:none">No upcoming tasks.</p>
+      <ul class="task-list" id="upcoming-list"></ul>
+    </div>
+
+    <div id="tab-all" class="tab-panel" style="display:none">
+      <p class="empty-state" id="all-empty" style="display:none">No tasks yet. Add one!</p>
+      <ul class="task-list" id="all-list"></ul>
+    </div>
+  </main>
+</div>
+
+<!-- Add Task Modal -->
+<div class="modal-backdrop" id="add-modal" style="display:none">
+  <div class="modal">
+    <h2>Add Task</h2>
+    <form id="add-form">
+      <label>
+        Name <span class="required">*</span>
+        <input type="text" id="task-name" placeholder="e.g. Review flashcards" required />
+      </label>
+      <label>
+        Description
+        <textarea id="task-desc" rows="3" placeholder="Optional notes…"></textarea>
+      </label>
+      <label>
+        Start date
+        <input type="date" id="task-start" />
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="close-add-modal">Cancel</button>
+        <button type="submit" class="btn-primary">Add</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- History Modal -->
+<div class="modal-backdrop" id="history-modal" style="display:none">
+  <div class="modal">
+    <h2 id="history-title">History</h2>
+    <ul class="history-list" id="history-list"></ul>
+    <div class="modal-actions">
+      <button type="button" class="btn-ghost" id="close-history-modal">Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
