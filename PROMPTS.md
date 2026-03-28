@@ -19,3 +19,6 @@
 9. What are some good sites for hosting a flask app like this? And what do I have to do to prepare the app for prod?
 
 10. Add a file so I can keep track of the prompts I used to create this
+11. Okay so for persistence it would make sense to move from sqlite to postgres right? And I can run postgres locally then point to a managed one if needed
+12. Okay let's get it running on gunicorn, then
+13. Set up the SECRET_KEY for me
