@@ -160,10 +160,21 @@ def auth_google():
     return google.authorize_redirect(redirect_uri)
 
 
+ALLOWED_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ALLOWED_EMAILS", "").split(",")
+    if e.strip()
+}
+
+
 @app.get("/auth/google/callback")
 def auth_google_callback():
     token = google.authorize_access_token()
     userinfo = token.get("userinfo") or google.userinfo()
+
+    if ALLOWED_EMAILS and userinfo["email"].lower() not in ALLOWED_EMAILS:
+        return render_template("denied.html", email=userinfo["email"]), 403
+
     user_id = get_or_create_user(
         google_id=userinfo["sub"],
         email=userinfo["email"],
