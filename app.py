@@ -1,10 +1,11 @@
-import sqlite3
 import os
 from datetime import date, timedelta
 from functools import wraps
 from dotenv import load_dotenv
 from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for
 from authlib.integrations.flask_client import OAuth
+import psycopg2
+import psycopg2.extras
 
 load_dotenv()
 
@@ -15,11 +16,21 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "tasks.db")
+# Some platforms (Heroku, Railway) provide postgres:// URLs; psycopg2 needs postgresql://
+_db_url = os.environ.get("DATABASE_URL", "")
+if _db_url.startswith("postgres://"):
+    _db_url = _db_url.replace("postgres://", "postgresql://", 1)
+DATABASE_URL = _db_url
 
 # Spaced repetition intervals in days.
 # Each completion advances to the next index; past the last, the interval doubles.
 INTERVALS = [1, 3, 7, 14, 30, 90, 180, 365]
+
+ALLOWED_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ALLOWED_EMAILS", "").split(",")
+    if e.strip()
+}
 
 # ---------------------------------------------------------------------------
 # Google OAuth
@@ -45,7 +56,6 @@ def login_required(f):
 
 
 def api_login_required(f):
-    """Like login_required but returns JSON 401 instead of a redirect."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user_id" not in session:
@@ -59,7 +69,6 @@ def api_login_required(f):
 # ---------------------------------------------------------------------------
 
 def next_interval(interval_index: int) -> int:
-    """Return the number of days until next recurrence given current index."""
     if interval_index < len(INTERVALS):
         return INTERVALS[interval_index]
     doublings = interval_index - len(INTERVALS)
@@ -72,10 +81,24 @@ def next_interval(interval_index: int) -> int:
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA journal_mode=WAL")
+        g.db = psycopg2.connect(DATABASE_URL)
     return g.db
+
+
+def query(sql, params=(), one=False, returning=False):
+    """Execute a query and return results as dicts."""
+    db = get_db()
+    with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        if returning:
+            result = cur.fetchone()
+            db.commit()
+            return result
+        if cur.description:
+            rows = cur.fetchall()
+            return rows[0] if one else rows
+        db.commit()
+        return cur.rowcount
 
 
 @app.teardown_appcontext
@@ -86,61 +109,57 @@ def close_db(exc):
 
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.executescript("""
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            google_id TEXT UNIQUE NOT NULL,
-            email     TEXT NOT NULL,
-            name      TEXT,
-            picture   TEXT,
-            created_at TEXT NOT NULL DEFAULT (date('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS tasks (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER REFERENCES users(id),
-            name            TEXT NOT NULL,
-            description     TEXT,
-            created_at      TEXT NOT NULL DEFAULT (date('now')),
-            interval_index  INTEGER NOT NULL DEFAULT 0,
-            next_due_date   TEXT NOT NULL,
-            is_active       INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS completions (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id       INTEGER NOT NULL REFERENCES tasks(id),
-            completed_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            interval_days INTEGER NOT NULL
-        );
+            id         SERIAL PRIMARY KEY,
+            google_id  TEXT UNIQUE NOT NULL,
+            email      TEXT NOT NULL,
+            name       TEXT,
+            picture    TEXT,
+            created_at DATE NOT NULL DEFAULT CURRENT_DATE
+        )
     """)
-    # Migrate existing tasks table if user_id column is missing
-    try:
-        db.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER REFERENCES users(id)")
-        db.commit()
-    except Exception:
-        pass  # Column already exists
-    db.commit()
-    db.close()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id             SERIAL PRIMARY KEY,
+            user_id        INTEGER REFERENCES users(id),
+            name           TEXT NOT NULL,
+            description    TEXT,
+            created_at     DATE NOT NULL DEFAULT CURRENT_DATE,
+            interval_index INTEGER NOT NULL DEFAULT 0,
+            next_due_date  DATE NOT NULL,
+            is_active      INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS completions (
+            id            SERIAL PRIMARY KEY,
+            task_id       INTEGER NOT NULL REFERENCES tasks(id),
+            completed_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            interval_days INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def get_or_create_user(google_id, email, name, picture):
-    db = get_db()
-    row = db.execute("SELECT id FROM users WHERE google_id = ?", (google_id,)).fetchone()
+    row = query("SELECT id FROM users WHERE google_id = %s", (google_id,), one=True)
     if row:
-        db.execute(
-            "UPDATE users SET email=?, name=?, picture=? WHERE google_id=?",
+        query(
+            "UPDATE users SET email=%s, name=%s, picture=%s WHERE google_id=%s",
             (email, name, picture, google_id),
         )
-        db.commit()
         return row["id"]
-    cursor = db.execute(
-        "INSERT INTO users (google_id, email, name, picture) VALUES (?, ?, ?, ?)",
+    row = query(
+        "INSERT INTO users (google_id, email, name, picture) VALUES (%s, %s, %s, %s) RETURNING id",
         (google_id, email, name, picture),
+        returning=True,
     )
-    db.commit()
-    return cursor.lastrowid
+    return row["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -158,13 +177,6 @@ def login_page():
 def auth_google():
     redirect_uri = url_for("auth_google_callback", _external=True)
     return google.authorize_redirect(redirect_uri)
-
-
-ALLOWED_EMAILS = {
-    e.strip().lower()
-    for e in os.environ.get("ALLOWED_EMAILS", "").split(",")
-    if e.strip()
-}
 
 
 @app.get("/auth/google/callback")
@@ -200,7 +212,11 @@ def logout():
 @app.get("/")
 @login_required
 def index():
-    return render_template("index.html", user_name=session.get("user_name"), user_picture=session.get("user_picture"))
+    return render_template(
+        "index.html",
+        user_name=session.get("user_name"),
+        user_picture=session.get("user_picture"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,14 +226,12 @@ def index():
 @app.get("/api/tasks")
 @api_login_required
 def list_tasks():
-    db = get_db()
     today = date.today().isoformat()
-    rows = db.execute(
-        "SELECT id, name, description, created_at, interval_index, next_due_date "
-        "FROM tasks WHERE is_active = 1 AND user_id = ? ORDER BY next_due_date ASC",
+    rows = query(
+        "SELECT id, name, description, created_at::text, interval_index, next_due_date::text "
+        "FROM tasks WHERE is_active = 1 AND user_id = %s ORDER BY next_due_date ASC",
         (session["user_id"],),
-    ).fetchall()
-
+    )
     tasks = []
     for r in rows:
         idx = r["interval_index"]
@@ -233,7 +247,6 @@ def list_tasks():
             "current_interval_days": next_interval(idx),
             "next_interval_days": next_interval(idx + 1),
         })
-
     return jsonify(tasks)
 
 
@@ -248,15 +261,12 @@ def create_task():
     description = (data.get("description") or "").strip()
     start_date = data.get("start_date") or date.today().isoformat()
 
-    db = get_db()
-    cursor = db.execute(
-        "INSERT INTO tasks (user_id, name, description, next_due_date) VALUES (?, ?, ?, ?)",
+    row = query(
+        "INSERT INTO tasks (user_id, name, description, next_due_date) "
+        "VALUES (%s, %s, %s, %s) RETURNING id, name, description, created_at::text, interval_index, next_due_date::text",
         (session["user_id"], name, description, start_date),
+        returning=True,
     )
-    db.commit()
-    task_id = cursor.lastrowid
-
-    row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     today = date.today().isoformat()
     return jsonify({
         "id": row["id"],
@@ -275,11 +285,11 @@ def create_task():
 @app.post("/api/tasks/<int:task_id>/complete")
 @api_login_required
 def complete_task(task_id):
-    db = get_db()
-    row = db.execute(
-        "SELECT * FROM tasks WHERE id = ? AND is_active = 1 AND user_id = ?",
+    row = query(
+        "SELECT interval_index FROM tasks WHERE id = %s AND is_active = 1 AND user_id = %s",
         (task_id, session["user_id"]),
-    ).fetchone()
+        one=True,
+    )
     if not row:
         return jsonify({"error": "task not found"}), 404
 
@@ -287,16 +297,14 @@ def complete_task(task_id):
     days = next_interval(new_index)
     new_due = (date.today() + timedelta(days=days)).isoformat()
 
-    db.execute(
-        "INSERT INTO completions (task_id, interval_days) VALUES (?, ?)",
+    query(
+        "INSERT INTO completions (task_id, interval_days) VALUES (%s, %s)",
         (task_id, next_interval(row["interval_index"])),
     )
-    db.execute(
-        "UPDATE tasks SET interval_index = ?, next_due_date = ? WHERE id = ?",
+    query(
+        "UPDATE tasks SET interval_index = %s, next_due_date = %s WHERE id = %s",
         (new_index, new_due, task_id),
     )
-    db.commit()
-
     return jsonify({
         "id": task_id,
         "interval_index": new_index,
@@ -308,13 +316,11 @@ def complete_task(task_id):
 @app.delete("/api/tasks/<int:task_id>")
 @api_login_required
 def delete_task(task_id):
-    db = get_db()
-    result = db.execute(
-        "UPDATE tasks SET is_active = 0 WHERE id = ? AND is_active = 1 AND user_id = ?",
+    rowcount = query(
+        "UPDATE tasks SET is_active = 0 WHERE id = %s AND is_active = 1 AND user_id = %s",
         (task_id, session["user_id"]),
     )
-    db.commit()
-    if result.rowcount == 0:
+    if rowcount == 0:
         return jsonify({"error": "task not found"}), 404
     return "", 204
 
@@ -322,19 +328,19 @@ def delete_task(task_id):
 @app.get("/api/tasks/<int:task_id>/history")
 @api_login_required
 def task_history(task_id):
-    db = get_db()
-    # Verify ownership
-    row = db.execute(
-        "SELECT id FROM tasks WHERE id = ? AND user_id = ?",
+    row = query(
+        "SELECT id FROM tasks WHERE id = %s AND user_id = %s",
         (task_id, session["user_id"]),
-    ).fetchone()
+        one=True,
+    )
     if not row:
         return jsonify({"error": "task not found"}), 404
 
-    rows = db.execute(
-        "SELECT completed_at, interval_days FROM completions WHERE task_id = ? ORDER BY completed_at DESC",
+    rows = query(
+        "SELECT completed_at::text, interval_days FROM completions "
+        "WHERE task_id = %s ORDER BY completed_at DESC",
         (task_id,),
-    ).fetchall()
+    )
     return jsonify([dict(r) for r in rows])
 
 
