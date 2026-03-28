@@ -11,7 +11,16 @@
 <div class="layout">
   <header>
     <h1>Recurring Tasks</h1>
-    <button class="btn-primary" id="open-add-modal">+ Add Task</button>
+    <div class="header-right">
+      <button class="btn-primary" id="open-add-modal">+ Add Task</button>
+      <a href="/logout" class="user-menu" title="Sign out">
+        {% if user_picture %}
+          <img src="{{ user_picture }}" alt="{{ user_name }}" class="avatar" referrerpolicy="no-referrer" />
+        {% else %}
+          <span class="avatar-placeholder">{{ user_name[0] }}</span>
+        {% endif %}
+      </a>
+    </div>
   </header>
 
   <nav class="tabs">

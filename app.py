@@ -1,21 +1,67 @@
 import sqlite3
 import os
 from datetime import date, timedelta
-from flask import Flask, g, jsonify, render_template, request
+from functools import wraps
+from dotenv import load_dotenv
+from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for
+from authlib.integrations.flask_client import OAuth
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "tasks.db")
 
 # Spaced repetition intervals in days.
 # Each completion advances to the next index; past the last, the interval doubles.
 INTERVALS = [1, 3, 7, 14, 30, 90, 180, 365]
 
+# ---------------------------------------------------------------------------
+# Google OAuth
+# ---------------------------------------------------------------------------
+
+oauth = OAuth(app)
+google = oauth.register(
+    name="google",
+    client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+    client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={"scope": "openid email profile"},
+)
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login_page"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+def api_login_required(f):
+    """Like login_required but returns JSON 401 instead of a redirect."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "not authenticated"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ---------------------------------------------------------------------------
+# Interval helpers
+# ---------------------------------------------------------------------------
 
 def next_interval(interval_index: int) -> int:
     """Return the number of days until next recurrence given current index."""
     if interval_index < len(INTERVALS):
         return INTERVALS[interval_index]
-    # Past the defined schedule: double the last interval each time
     doublings = interval_index - len(INTERVALS)
     return INTERVALS[-1] * (2 ** (doublings + 1))
 
@@ -42,8 +88,18 @@ def close_db(exc):
 def init_db():
     db = sqlite3.connect(DB_PATH)
     db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            google_id TEXT UNIQUE NOT NULL,
+            email     TEXT NOT NULL,
+            name      TEXT,
+            picture   TEXT,
+            created_at TEXT NOT NULL DEFAULT (date('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS tasks (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER REFERENCES users(id),
             name            TEXT NOT NULL,
             description     TEXT,
             created_at      TEXT NOT NULL DEFAULT (date('now')),
@@ -53,32 +109,102 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS completions (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id      INTEGER NOT NULL REFERENCES tasks(id),
-            completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id       INTEGER NOT NULL REFERENCES tasks(id),
+            completed_at  TEXT NOT NULL DEFAULT (datetime('now')),
             interval_days INTEGER NOT NULL
         );
     """)
+    # Migrate existing tasks table if user_id column is missing
+    try:
+        db.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER REFERENCES users(id)")
+        db.commit()
+    except Exception:
+        pass  # Column already exists
     db.commit()
     db.close()
 
 
+def get_or_create_user(google_id, email, name, picture):
+    db = get_db()
+    row = db.execute("SELECT id FROM users WHERE google_id = ?", (google_id,)).fetchone()
+    if row:
+        db.execute(
+            "UPDATE users SET email=?, name=?, picture=? WHERE google_id=?",
+            (email, name, picture, google_id),
+        )
+        db.commit()
+        return row["id"]
+    cursor = db.execute(
+        "INSERT INTO users (google_id, email, name, picture) VALUES (?, ?, ?, ?)",
+        (google_id, email, name, picture),
+    )
+    db.commit()
+    return cursor.lastrowid
+
+
 # ---------------------------------------------------------------------------
-# Routes
+# Auth routes
+# ---------------------------------------------------------------------------
+
+@app.get("/login")
+def login_page():
+    if "user_id" in session:
+        return redirect("/")
+    return render_template("login.html")
+
+
+@app.get("/auth/google")
+def auth_google():
+    redirect_uri = url_for("auth_google_callback", _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+
+@app.get("/auth/google/callback")
+def auth_google_callback():
+    token = google.authorize_access_token()
+    userinfo = token.get("userinfo") or google.userinfo()
+    user_id = get_or_create_user(
+        google_id=userinfo["sub"],
+        email=userinfo["email"],
+        name=userinfo.get("name", ""),
+        picture=userinfo.get("picture", ""),
+    )
+    session["user_id"] = user_id
+    session["user_name"] = userinfo.get("name", userinfo["email"])
+    session["user_picture"] = userinfo.get("picture", "")
+    return redirect("/")
+
+
+@app.get("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
+# ---------------------------------------------------------------------------
+# App routes
 # ---------------------------------------------------------------------------
 
 @app.get("/")
+@login_required
 def index():
-    return render_template("index.html")
+    return render_template("index.html", user_name=session.get("user_name"), user_picture=session.get("user_picture"))
 
+
+# ---------------------------------------------------------------------------
+# API routes
+# ---------------------------------------------------------------------------
 
 @app.get("/api/tasks")
+@api_login_required
 def list_tasks():
     db = get_db()
     today = date.today().isoformat()
     rows = db.execute(
         "SELECT id, name, description, created_at, interval_index, next_due_date "
-        "FROM tasks WHERE is_active = 1 ORDER BY next_due_date ASC"
+        "FROM tasks WHERE is_active = 1 AND user_id = ? ORDER BY next_due_date ASC",
+        (session["user_id"],),
     ).fetchall()
 
     tasks = []
@@ -101,6 +227,7 @@ def list_tasks():
 
 
 @app.post("/api/tasks")
+@api_login_required
 def create_task():
     data = request.get_json(force=True)
     name = (data.get("name") or "").strip()
@@ -112,13 +239,14 @@ def create_task():
 
     db = get_db()
     cursor = db.execute(
-        "INSERT INTO tasks (name, description, next_due_date) VALUES (?, ?, ?)",
-        (name, description, start_date),
+        "INSERT INTO tasks (user_id, name, description, next_due_date) VALUES (?, ?, ?, ?)",
+        (session["user_id"], name, description, start_date),
     )
     db.commit()
     task_id = cursor.lastrowid
 
     row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    today = date.today().isoformat()
     return jsonify({
         "id": row["id"],
         "name": row["name"],
@@ -126,16 +254,20 @@ def create_task():
         "created_at": row["created_at"],
         "interval_index": row["interval_index"],
         "next_due_date": row["next_due_date"],
+        "is_overdue": row["next_due_date"] < today,
+        "is_due_today": row["next_due_date"] == today,
         "current_interval_days": next_interval(0),
         "next_interval_days": next_interval(1),
     }), 201
 
 
 @app.post("/api/tasks/<int:task_id>/complete")
+@api_login_required
 def complete_task(task_id):
     db = get_db()
     row = db.execute(
-        "SELECT * FROM tasks WHERE id = ? AND is_active = 1", (task_id,)
+        "SELECT * FROM tasks WHERE id = ? AND is_active = 1 AND user_id = ?",
+        (task_id, session["user_id"]),
     ).fetchone()
     if not row:
         return jsonify({"error": "task not found"}), 404
@@ -163,10 +295,12 @@ def complete_task(task_id):
 
 
 @app.delete("/api/tasks/<int:task_id>")
+@api_login_required
 def delete_task(task_id):
     db = get_db()
     result = db.execute(
-        "UPDATE tasks SET is_active = 0 WHERE id = ? AND is_active = 1", (task_id,)
+        "UPDATE tasks SET is_active = 0 WHERE id = ? AND is_active = 1 AND user_id = ?",
+        (task_id, session["user_id"]),
     )
     db.commit()
     if result.rowcount == 0:
@@ -175,8 +309,17 @@ def delete_task(task_id):
 
 
 @app.get("/api/tasks/<int:task_id>/history")
+@api_login_required
 def task_history(task_id):
     db = get_db()
+    # Verify ownership
+    row = db.execute(
+        "SELECT id FROM tasks WHERE id = ? AND user_id = ?",
+        (task_id, session["user_id"]),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "task not found"}), 404
+
     rows = db.execute(
         "SELECT completed_at, interval_days FROM completions WHERE task_id = ? ORDER BY completed_at DESC",
         (task_id,),
