@@ -18,6 +18,8 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 
 # Some platforms (Heroku, Railway) provide postgres:// URLs; psycopg2 needs postgresql://
 _db_url = os.environ.get("DATABASE_URL", "")
+if not _db_url:
+    raise RuntimeError("DATABASE_URL environment variable is not set")
 if _db_url.startswith("postgres://"):
     _db_url = _db_url.replace("postgres://", "postgresql://", 1)
 DATABASE_URL = _db_url
