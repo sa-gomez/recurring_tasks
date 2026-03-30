@@ -22,12 +22,38 @@ Each task has an interval that advances on every completion:
 
 ## Setup
 
+**Prerequisites:** Python 3, PostgreSQL (e.g. `brew install postgresql@17`)
+
 ```bash
-pip3 install flask
+# Install dependencies
+pip3 install -r requirements.txt
+
+# Create the local database
+createdb recurring_tasks
+
+# Configure environment
+cp .env.example .env
+# Fill in SECRET_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ALLOWED_EMAILS
+# DATABASE_URL defaults to postgresql://localhost/recurring_tasks
+```
+
+**Google OAuth:** Create OAuth 2.0 credentials at [console.cloud.google.com](https://console.cloud.google.com) and add `http://localhost:5000/auth/google/callback` as an authorized redirect URI.
+
+```bash
+# Run the development server
 python3 app.py
 ```
 
-Then open [http://localhost:5000](http://localhost:5000).
+Or with gunicorn:
+```bash
+gunicorn -b 127.0.0.1:5000 app:app
+```
+
+Then open [http://127.0.0.1:5000](http://127.0.0.1:5000).
+
+## Deploying
+
+The app is configured for [Railway](https://railway.app). Push to GitHub, connect the repo in Railway, add a Postgres database, and set the environment variables from `.env` in the Railway dashboard (`DATABASE_URL` is injected automatically when you link the database).
 
 ## Features
 
