@@ -39,21 +39,38 @@ cp .env.example .env
 
 **Google OAuth:** Create OAuth 2.0 credentials at [console.cloud.google.com](https://console.cloud.google.com) and add `http://localhost:5000/auth/google/callback` as an authorized redirect URI.
 
+## Running locally
+
+**Option 1 — Flask dev server (recommended for local development):**
 ```bash
-# Run the development server
 python3 app.py
 ```
 
-Or with gunicorn:
+**Option 2 — gunicorn (macOS note: use `gthread` worker to avoid fork issues):**
 ```bash
-gunicorn -b 127.0.0.1:5000 app:app
+gunicorn --worker-class=gthread -b 127.0.0.1:5000 app:app
 ```
 
-Then open [http://127.0.0.1:5000](http://127.0.0.1:5000).
+Then open [http://localhost:5000](http://localhost:5000).
 
-## Deploying
+## Running in production
 
-The app is configured for [Railway](https://railway.app). Push to GitHub, connect the repo in Railway, add a Postgres database, and set the environment variables from `.env` in the Railway dashboard (`DATABASE_URL` is injected automatically when you link the database).
+The app is configured for [Railway](https://railway.app):
+
+1. Push to GitHub and connect the repo in Railway
+2. Add a Postgres database service in Railway
+3. Link `DATABASE_URL` from the Postgres service to your app service via variable reference
+4. Set the remaining environment variables in the Railway dashboard:
+   ```
+   SECRET_KEY=...
+   GOOGLE_CLIENT_ID=...
+   GOOGLE_CLIENT_SECRET=...
+   ALLOWED_EMAILS=...
+   ```
+5. Add your Railway domain to the authorized redirect URIs in Google Cloud Console:
+   `https://yourapp.railway.app/auth/google/callback`
+
+Railway uses the `Procfile` to start the app with gunicorn. Every push to GitHub triggers an automatic redeploy.
 
 ## Features
 
