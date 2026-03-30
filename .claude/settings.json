@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"systemMessage\": \"💡 Did anything significant change this session? If so, say: update CLAUDE.md\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}
